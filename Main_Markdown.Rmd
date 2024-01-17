@@ -1,0 +1,241 @@
+---
+title: "Main_Markdown"
+author: "Tobias Gradinger"
+date: "2024-01-17"
+output: html_document
+---
+Find the tutorial here: https://choishingwan.github.io/PRS-Tutorial/target/
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{bash, eval=F}
+#bash chunks do not work for whatever reason - execute in terminal
+#creates a hash which can be compared to the hash given by the provider - if identical data should not be compromised
+md5sum Height.gwas.txt.gz
+```
+
+```{r SETUP-Packages, eval=T, message=F}
+library(data.table)
+library(dplyr)
+```
+
+```{r READ Data}
+dat <- fread("Height.gwas.txt.gz")
+```
+
+```{r DATA Quality Control I Info and MAF filtering}
+# Filter out SNPs with too much imputation (INFO > 0.8) and too low of a minor allele freq (MAF > 0.01))
+result <- dat[INFO > 0.8 & MAF > 0.01]
+```
+
+```{r WRITE Data Heigth.gz}
+# Output the gz file after the Filtering
+fwrite(result, "Height.gz", sep="\t")
+```
+
+```{r Data Quality control II Remove duplicate SNPs}
+# Find number of duplicate SNPs
+result %>% 
+  count(SNP, name = "count") %>% 
+  filter (count>1) %>% 
+  length()
+
+# Remove duplicates from the dataset
+result.clean <-
+  result %>% 
+  distinct()
+```
+
+```{r WRITE DATA Height.nodup.gz}
+fwrite(result.clean, "Height.nodup.gz", sep="\t")
+```
+
+```{r Data Quality control III Filter out ambigous SNPs}
+result.clean<-
+result.clean %>% 
+  filter(!(A1 == "A" & A2 == "T" |
+           A1 == "T" & A2 == "A" |
+           A1 == "G" & A2 == "C" |
+           A1 == "C" & A2 == "G"))
+```
+
+```{r WRITE DATA Height.QC.gz}
+fwrite(result.clean, "Height.QC.gz", sep="\t")
+```
+
+# Target data
+
+## Control the hashes
+```{bash, eval=F}
+md5sum EUR.bed
+md5sum EUR.bim
+md5sum EUR.cov
+md5sum EUR.fam
+md5sum EUR.height
+```
+
+## MAF, Hardy-Weinberg, Imputes, Missings 
+```{bash, eval=F}
+# the target data is cleaned up based on certain criteria (see tutorial or paper)
+plink \
+    --bfile EUR \
+    --maf 0.01 \
+    --hwe 1e-6 \
+    --geno 0.01 \
+    --mind 0.01 \
+    --write-snplist \
+    --make-just-fam \
+    --out EUR.QC
+```
+
+## Pruning
+```{bash, eval=F}
+# Pruning is done, creates two files: EUR.QC.prune.in (r^2>0.25) and EUR.QC.prune.out
+plink \
+    --bfile EUR \
+    --keep EUR.QC.fam \
+    --extract EUR.QC.snplist \
+    --indep-pairwise 200 50 0.25 \
+    --out EUR.QC
+```
+
+## Heterozygosity
+```{bash, eval=F}
+# F Score for heterozygosity is calculated
+plink \
+    --bfile EUR \
+    --extract EUR.QC.prune.in \
+    --keep EUR.QC.fam \
+    --het \
+    --out EUR.QC
+```
+
+```{r DATA filtering based on F Score}
+# Read in file
+dat <- fread("EUR.QC.het")
+# Get samples with F coefficient within 3 SD of the population mean
+valid <-
+  dat %>% 
+  filter(F<=mean(F)+3*sd(F) & F>=mean(F)-3*sd(F))
+# print FID and IID for valid samples
+fwrite(valid[,c("FID","IID")], "EUR.valid.sample", sep="\t") 
+```
+
+## Mismatching SNPs (between base and target data)
+```{r read DATA EUR.bim Height.Qc.gz EUR.QC.snplist}
+# Read in bim file 
+bim <- fread("EUR.bim") %>%
+    # Note: . represents the output from previous step
+    # The syntax here means, setnames of the data read from
+    # the bim file, and replace the original column names by 
+    # the new names
+    setnames(., colnames(.), c("CHR", "SNP", "CM", "BP", "B.A1", "B.A2")) %>%
+    # And immediately change the alleles to upper cases
+    .[,c("B.A1","B.A2"):=list(toupper(B.A1), toupper(B.A2))]
+# Read in summary statistic data aka the base data (GWAS)
+height <- fread("Height.QC.gz") %>%
+    # And immediately change the alleles to upper cases
+    .[,c("A1","A2"):=list(toupper(A1), toupper(A2))]
+# Read in QCed SNPs
+qc <- fread("EUR.QC.snplist", header=F)
+```
+
+```{r merge base and target}
+# Merge summary statistic with target
+info <- merge(bim, height, by=c("SNP", "CHR", "BP")) %>%
+    # And filter out QCed SNPs
+    .[SNP %in% qc[,V1]]
+
+# Function for calculating the complementary allele
+complement <- function(x){
+    switch (x,
+        "A" = "T",
+        "C" = "G",
+        "T" = "A",
+        "G" = "C",
+        return(NA)
+    )
+} 
+# Get SNPs that have the same alleles across base and target
+info.match <- info[A1 == B.A1 & A2 == B.A2, SNP]
+# Identify SNPs that are complementary between base and target
+com.snps <- info[sapply(B.A1, complement) == A1 &
+                    sapply(B.A2, complement) == A2, SNP]
+# Now update the bim file
+bim[SNP %in% com.snps, c("B.A1", "B.A2") :=
+        list(sapply(B.A1, complement),
+            sapply(B.A2, complement))]
+```
+
+```{r}
+# identify SNPs that need recoding
+recode.snps <- info[B.A1==A2 & B.A2==A1, SNP]
+# Update the bim file
+bim[SNP %in% recode.snps, c("B.A1", "B.A2") :=
+        list(B.A2, B.A1)]
+
+# identify SNPs that need recoding & complement
+com.recode <- info[sapply(B.A1, complement) == A2 &
+                    sapply(B.A2, complement) == A1, SNP]
+# Now update the bim file
+bim[SNP %in% com.recode, c("B.A1", "B.A2") :=
+        list(sapply(B.A2, complement),
+            sapply(B.A1, complement))]
+# Write the updated bim file
+fwrite(bim[,c("SNP", "B.A1")], "EUR.a1", col.names=F, sep="\t")
+```
+
+```{r}
+mismatch <- bim[!(SNP %in% info.match |
+                    SNP %in% com.snps |
+                    SNP %in% recode.snps |
+                    SNP %in% com.recode), SNP]
+write.table(mismatch, "EUR.mismatch", quote=F, row.names=F, col.names=F)
+```
+
+##Sex check
+```{bash, eval=F}
+plink \
+    --bfile EUR \
+    --extract EUR.QC.prune.in \
+    --keep EUR.valid.sample \
+    --check-sex \
+    --out EUR.QC
+```
+
+```{r}
+# Read in file
+valid <- fread("EUR.valid.sample")
+dat <- fread("EUR.QC.sexcheck")[FID%in%valid$FID]
+fwrite(dat[STATUS=="OK",c("FID","IID")], "EUR.QC.valid", sep="\t") 
+```
+
+## Relatedness
+
+```{bash, eval=F}
+plink \
+    --bfile EUR \
+    --extract EUR.QC.prune.in \
+    --keep EUR.QC.valid \
+    --rel-cutoff 0.125 \
+    --out EUR.QC
+```
+
+## Generate final file with all the QC steps applied
+
+```{bash, eval=F}
+plink \
+    --bfile EUR \
+    --make-bed \
+    --keep EUR.QC.rel.id \
+    --out EUR.QC \
+    --extract EUR.QC.snplist \
+    --exclude EUR.mismatch \
+    --a1-allele EUR.a1
+```
+
+
+
+
