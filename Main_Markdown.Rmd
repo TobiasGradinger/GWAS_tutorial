@@ -10,17 +10,44 @@ Find the tutorial here: https://choishingwan.github.io/PRS-Tutorial/target/
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r SETUP-Packages, eval=T, message=F}
+library(data.table)
+library(dplyr)
+```
+
+# QC of base data
+
+## Heritability check
+Chip-heritability estimate should be h^2 snp > .05
+Methods for estimating heritability:
+- LD Score Regression (LDSC) (Paper: LD Score Regression Distinguishes Confounding from Polygenicity in Genome-Wide Association Studies, Brendan 2015)
+-- Variants which are in linkage disequilibrium with a causal variant show elevated test statistics (OR/Beta/etc.) proportional to the linkage disequilibrium (measured ad r^2)
+-- Cryptic relatedness
+--- subjects are more related with each other than expected
+-- Population stratification (syn: population structure, genetic structure)
+--- systemic difference of allele frequency between subpopulations. E.g. through non-random mating. Leads, among other things, to a reduction of
+--- heterozygosity (Mutter und Vater Allele sind im Schnitt ähnlicher -> weniger Allele sind heterozygot)
+---- Measured with Wright's F-statistics (Fst = 1 - (heterozygote Allel-Frequenz in der Subpopulation / heterozygote Allel-Frequenz in der Gesamtpopulation))
+---- if it is 0 then they are identical suggesting no structure
+will not correlate with the LD Score
+
+## Effect allele
+It is important to know which allele is the effect allele and which is the non-effect allele for PRS association results to be in the correct direction.
+
+## File transfer
+Integrity of the file afer several transfers can be checked with a hash.
+
 ```{bash, eval=F}
 #bash chunks do not work for whatever reason - execute in terminal
 #creates a hash which can be compared to the hash given by the provider - if identical data should not be compromised
 md5sum Height.gwas.txt.gz
 ```
 
-```{r SETUP-Packages, eval=T, message=F}
-library(data.table)
-library(dplyr)
-```
+## Genome build
+Base and target data must be on the same genome build. If not tools such as LiftOver can beused to synchronize them.
 
+## Standard QWAS QC
+Standardfilter sind MAF > 1% und INFO (imputation information score) < 0.8
 ```{r READ Data}
 dat <- fread("Height.gwas.txt.gz")
 ```
@@ -35,6 +62,11 @@ result <- dat[INFO > 0.8 & MAF > 0.01]
 fwrite(result, "Height.gz", sep="\t")
 ```
 
+## Mismatching SNPs
+Strand-flipping will be performed in the target data.
+
+## Duplicate SNPs
+Can happen if an error occurred in the generation of the base data. Have to be removed.
 ```{r Data Quality control II Remove duplicate SNPs}
 # Find number of duplicate SNPs
 result %>% 
@@ -52,6 +84,8 @@ result.clean <-
 fwrite(result.clean, "Height.nodup.gz", sep="\t")
 ```
 
+## Ambigous SNPs
+Base und target data sind manchmal mit unterschiedlichen genotyping chips generiert worden.Wenn jetzt unklar ist, ob der + oder der - Strang verwendet wurde, ist es unmöglich ambigous SNPs zu pairen (A/T, T/A, G/C, C/G) 
 ```{r Data Quality control III Filter out ambigous SNPs}
 result.clean<-
 result.clean %>% 
@@ -187,7 +221,7 @@ bim[SNP %in% com.recode, c("B.A1", "B.A2") :=
 fwrite(bim[,c("SNP", "B.A1")], "EUR.a1", col.names=F, sep="\t")
 ```
 
-```{r}
+```{r Still different allele in base and target}
 mismatch <- bim[!(SNP %in% info.match |
                     SNP %in% com.snps |
                     SNP %in% recode.snps |
@@ -195,8 +229,13 @@ mismatch <- bim[!(SNP %in% info.match |
 write.table(mismatch, "EUR.mismatch", quote=F, row.names=F, col.names=F)
 ```
 
-##Sex check
+## Duplicate SNPs
+Not necessary in this tutorial as the target data is simulated data.
+
+##Sex check 
+Use plink to check whether the sex phenotype corresponds to the gonosome genotype. X-Chromosome homozygosity estimate <0.2 is considered female >0.8 is considered male.
 ```{bash, eval=F}
+# generating the F-statistic using plink
 plink \
     --bfile EUR \
     --extract EUR.QC.prune.in \
@@ -212,7 +251,13 @@ dat <- fread("EUR.QC.sexcheck")[FID%in%valid$FID]
 fwrite(dat[STATUS=="OK",c("FID","IID")], "EUR.QC.valid", sep="\t") 
 ```
 
+## Sample overlap
+Since the target data were simulated there are no overlapping samples between the base and target data here (see the relevant section of the paper for discussion of the importance of avoiding sample overlap).
+
 ## Relatedness
+Closely related individuals in the target data may lead to overfitted results, limiting the generalisability of the results.
+
+Before calculating the relatedness, pruning should be performed (see here). Individuals that have a first or second degree relative in the sample (π > 0.125) can be removed with the following command:
 
 ```{bash, eval=F}
 plink \
@@ -235,6 +280,12 @@ plink \
     --exclude EUR.mismatch \
     --a1-allele EUR.a1
 ```
+
+# End of Quality control
+
+# Programs and methods to calculate and analyze the Polygenic risk scores
+
+## Plink
 
 
 
